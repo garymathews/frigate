@@ -1,13 +1,16 @@
 name: 'Setup'
-description: 'Set up QEMU and Buildx'
+description: 'Setup build environment'
 inputs:
   GITHUB_TOKEN:
     required: true
 outputs:
   image-name:
     value: ghcr.io/${{ steps.lowercaseRepo.outputs.lowercase }}:${{ steps.create-short-sha.outputs.SHORT_SHA }}
+  latest-name:
+    value: ghcr.io/${{ steps.lowercaseRepo.outputs.lowercase }}:latest
   cache-name:
     value: ghcr.io/${{ steps.lowercaseRepo.outputs.lowercase }}:cache
+
 runs:
   using: "composite"
   steps:
@@ -15,6 +18,7 @@ runs:
     - name: Stop docker
       run: sudo systemctl stop docker
       shell: bash
+
     # This creates a virtual volume at /var/lib/docker to maximize the size
     # As of 2/14/2024, this results in 97G for docker images
     - name: Maximize build space
@@ -25,26 +29,33 @@ runs:
         remove-haskell: 'true'
         remove-codeql: 'true'
         build-mount-path: '/var/lib/docker'
+
     - name: Start docker
       run: sudo systemctl start docker
       shell: bash
+
     - id: lowercaseRepo
       uses: ASzc/change-string-case-action@v5
       with:
         string: ${{ github.repository }}
+
     - name: Set up QEMU
       uses: docker/setup-qemu-action@v3
+
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
+
     - name: Log in to the Container registry
       uses: docker/login-action@465a07811f14bebb1938fbed4728c6a1ff8901fc
       with:
         registry: ghcr.io
         username: ${{ github.actor }}
         password: ${{ inputs.GITHUB_TOKEN }}
+
     - name: Create version file
       run: make version
       shell: bash
+
     - id: create-short-sha
       run: echo "SHORT_SHA=${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
       shell: bash
