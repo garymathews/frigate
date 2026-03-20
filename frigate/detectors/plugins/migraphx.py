@@ -80,10 +80,6 @@ class migraphxDetector(DetectionApi):
             else:
                 raise Exception(f"migraphx: unknown model format {path}")
 
-            self.model_output_shapes = self.model.get_output_shapes()
-            self.model_is_nms = self.model_output_shapes[0].lens()[2] <= 7
-            assert self.model_is_nms is False, "migraphx does not currently support NMS models"
-
             logger.info(f"migraphx: compiling the model... (fast_math: {detector_config.fast_math}, exhaustive_tune: {detector_config.exhaustive_tune})")
             self.model.compile(
                 migraphx.get_target(device),
@@ -94,6 +90,16 @@ class migraphxDetector(DetectionApi):
 
             logger.info(f"migraphx: saving compiled model into cache {mxr_cache_path}")
             migraphx.save(self.model, str(mxr_cache_path))
+
+        self.model_output_shapes = self.model.get_output_shapes()
+        output_shape = self.model_output_shapes[0].lens()
+
+        # Logic to determine model type:
+        # Legacy YOLO (v8 to v12 style): [1, 84, 8400]
+        # E2E YOLO (v26 style): [1, 300, 6]
+        self.model_is_e2e = len(output_shape) == 3 and output_shape[2] <= 7
+        if self.model_is_e2e:
+            logger.info(f"migraphx: detected end-to-end model (yolo26)")
 
         self.model_param_name = self.model.get_parameter_names()[0]
         self.model_input_shape_obj = self.model.get_parameter_shapes()[self.model_param_name]
@@ -137,6 +143,47 @@ class migraphxDetector(DetectionApi):
         return self.optimized_process_yolo(tensor_output)
 
     def optimized_process_yolo(
+        self,
+        tensor_output,
+        confidence_threshold=0.4,
+        intersection_over_union_threshold=0.4,
+        top_k=100
+    ):
+        if self.model_is_e2e:
+            return self._process_yolo_e2e(tensor_output, confidence_threshold)
+        else:
+            return self._process_yolo(tensor_output, confidence_threshold, intersection_over_union_threshold, top_k)
+
+    def _process_yolo_e2e(self, tensor_output, confidence_threshold):
+        detections = tensor_output[0]
+
+        # Filter by confidence (index 4 is usually score)
+        scores = detections[:, 4]
+        mask = scores > confidence_threshold
+        filtered = detections[mask]
+
+        if len(filtered) == 0:
+            return np.zeros((20, 6), dtype=np.float32)
+
+        # Sort by score descending and take top 20
+        top_indices = np.argsort(filtered[:, 4])[::-1][:20]
+        final_set = filtered[top_indices]
+        num_dets = len(final_set)
+
+        results = np.zeros((20, 6), dtype=np.float32)
+
+        # Map to Frigate format: [class_id, score, y1, x1, y2, x2]
+        # Note: E2E models usually output absolute pixel coordinates [x1, y1, x2, y2]
+        results[:num_dets, 0] = final_set[:, 5] # class_id
+        results[:num_dets, 1] = final_set[:, 4] # confidence
+        results[:num_dets, 2] = final_set[:, 1] / self.height # y1
+        results[:num_dets, 3] = final_set[:, 0] / self.width  # x1
+        results[:num_dets, 4] = final_set[:, 3] / self.height # y2
+        results[:num_dets, 5] = final_set[:, 2] / self.width  # x2
+
+        return results
+
+    def _process_yolo(
         self,
         tensor_output,
         confidence_threshold=0.4,
