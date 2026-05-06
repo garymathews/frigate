@@ -1,1 +1,1 @@
-onnxruntime-migraphx @ https://github.com/garymathews/frigate-onnxruntime-rocm/releases/download/v7.2.0/onnxruntime_migraphx-1.23.2-cp311-cp311-linux_x86_64.whl
+onnxruntime-migraphx @ https://github.com/garymathews/frigate-onnxruntime-rocm/releases/download/v7.2.3/onnxruntime_migraphx-1.25.1-cp311-cp311-linux_x86_64.whl
