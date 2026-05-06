@@ -1,5 +1,5 @@
 variable "ROCM" {
-  default = "7.2.3"
+  default = "7.2.4"
 }
 variable "HSA_OVERRIDE_GFX_VERSION" {
   default = ""
