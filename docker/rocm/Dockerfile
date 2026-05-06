@@ -24,7 +24,7 @@ RUN apt update && \
 
 # Install migraphx built with gfx900 included as a target
 WORKDIR /tmp
-RUN wget https://github.com/garymathews/AMDMIGraphX/releases/download/v7.2.0/migraphx-v7.2.0.tar.gz && \
+RUN wget https://github.com/garymathews/AMDMIGraphX/releases/download/v7.2.3/migraphx-v7.2.3-1.26.0.tar.gz && \
     tar -xvzf migraphx-*.tar.gz -C /opt/rocm-$ROCM
 
 # Copy rocBLAS libraries for gfx900 from ROCm 6.3.4 (last version with gfx900 support)
@@ -96,8 +96,15 @@ COPY docker/rocm/debian-backports.sources /etc/apt/sources.list.d/debian-backpor
 RUN apt update && \
     # Install backported MESA VA and Vulkan drivers for video decoding acceleration
     apt install -qq -y -t bookworm-backports mesa-va-drivers mesa-vulkan-drivers && \
+    
     # Install C++ standard library headers for HIPRTC kernel compilation fallback
-    apt install -qq -y libstdc++-12-dev libnuma1 && \
+    echo "deb http://deb.debian.org/debian trixie main" > /etc/apt/sources.list.d/trixie.list && \
+    apt update && \
+    apt install -qq -y -t trixie libstdc++-14-dev && \
+
+    # Install libnuma
+    apt install -qq -y libnuma1 && \
+
     # Install libomp for migraphx CPU device type support
     apt install -qq -y libomp-dev && \
     rm -rf /var/lib/apt/lists/*
