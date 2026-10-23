@@ -1,7 +1,12 @@
-name: CI
+name: Build frigate (ROCm)
 
 on:
   workflow_dispatch:
+    inputs:
+      refresh-dependencies:
+        description: Refresh base images and runtime dependencies
+        type: boolean
+        default: false
   push:
     branches:
       - dev
@@ -9,70 +14,37 @@ on:
       - rocm-*
     paths-ignore:
       - "docs/**"
+      - "**/*.md"
+      - ".github/ISSUE_TEMPLATE/**"
+      - ".github/DISCUSSION_TEMPLATE/**"
 
-# only run the latest commit to avoid cache overwrites
+permissions:
+  contents: read
+  packages: write
+
+# Superseded hosted builds can stop without canceling self-hosted requests.
 concurrency:
-  group: ${{ github.ref }}
+  group: rocm-hosted-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  PYTHON_VERSION: 3.11
-
 jobs:
-  amd64_build:
-    runs-on: ubuntu-22.04
-    name: AMD64 Build
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-        with:
-          persist-credentials: false
-
-      - name: Setup
-        id: setup
-        uses: ./.github/actions/setup
-        with:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - name: Build
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          file: docker/main/Dockerfile
-          push: false
-          platforms: linux/amd64
-          target: frigate
-          tags: ${{ steps.setup.outputs.image-name }}-amd64
-          cache-from: type=registry,ref=${{ steps.setup.outputs.cache-name }}-amd64
-          cache-to: type=registry,ref=${{ steps.setup.outputs.cache-name }}-amd64,mode=max
-  
-  amd64_extra_builds:
-    runs-on: ubuntu-22.04
+  rocm_build:
     name: AMD64 ROCm Build
-    needs:
-      - amd64_build
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
+    concurrency:
+      group: rocm-10.1-${{ github.workflow }}
+      cancel-in-progress: false
+      queue: max
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
-
-      - name: Setup
-        id: setup
-        uses: ./.github/actions/setup
+      - name: Build and push
+        uses: ./.github/actions/rocm-build
         with:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Build and push
-        env:
-          HSA_OVERRIDE: 0
-        uses: docker/bake-action@v7
-        with:
-          source: .
-          push: true
-          targets: rocm
-          files: docker/rocm/rocm.hcl
-          set: |
-            rocm.tags=${{ steps.setup.outputs.image-name }}-${{ github.ref_name }}
-            rocm.tags=${{ steps.setup.outputs.latest-name }}-${{ github.ref_name }}
-            *.cache-to=type=registry,ref=${{ steps.setup.outputs.cache-name }}-rocm,mode=max
-            *.cache-from=type=registry,ref=${{ steps.setup.outputs.cache-name }}-rocm
+          publish-branch: ${{ vars.ROCM_PUBLISH_BRANCH || 'rocm-10.1' }}
+          maximize-build-space: 'true'
+          refresh-dependencies: ${{ inputs.refresh-dependencies || false }}

@@ -66,15 +66,30 @@ class migraphxDetector(DetectionApi):
         mxr_cache_path = cache_dir / f"{filename}.mxr"
         mxr_path = path.parent / f"{filename}.mxr"
 
-        if mxr_cache_path.exists():
-            logger.info(f"migraphx: loading compiled model from cache {mxr_cache_path}")
-            self.model = migraphx.load(str(mxr_cache_path))
+        compiled_path = mxr_cache_path if mxr_cache_path.exists() else mxr_path
+        self.model = None
+        if compiled_path.exists():
+            logger.info("migraphx: loading compiled model from %s", compiled_path)
+            try:
+                self.model = migraphx.load(str(compiled_path))
+            except RuntimeError as error:
+                if "Program version mismatch" not in str(error):
+                    raise
+                if path.suffix != ".onnx":
+                    logger.error(
+                        "migraphx: compiled model %s has an incompatible program version; "
+                        "configure model.path with the original ONNX model to regenerate it",
+                        compiled_path,
+                    )
+                    raise
+                logger.warning(
+                    "migraphx: compiled model %s has an incompatible program version; "
+                    "recompiling from %s",
+                    compiled_path,
+                    path,
+                )
 
-        elif mxr_path.exists():
-            logger.info(f"migraphx: loading compiled model from {mxr_path}")
-            self.model = migraphx.load(str(mxr_path))
-
-        else:
+        if self.model is None:
             logger.info(f"migraphx: loading model from {path}")
             if path.suffix == '.onnx':
                 self.model = migraphx.parse_onnx(str(path))

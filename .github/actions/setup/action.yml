@@ -1,28 +1,67 @@
-name: 'Setup'
-description: 'Setup build environment'
+name: Setup ROCm build
+description: Prepare Docker, registry access, and build metadata
 inputs:
   GITHUB_TOKEN:
+    description: Token for publishing to GHCR
     required: true
+  maximize-build-space:
+    description: Prepare extra Docker storage on GitHub-hosted runners
+    default: 'false'
+  build-jobs:
+    description: Number of compiler jobs
+    default: '4'
+  baseline-branch:
+    description: Branch whose registry cache can seed new builds
+    default: rocm-10.1
 outputs:
-  image-name:
-    value: ghcr.io/${{ steps.lowercaseRepo.outputs.lowercase }}:${{ steps.create-short-sha.outputs.SHORT_SHA }}
-  latest-name:
-    value: ghcr.io/${{ steps.lowercaseRepo.outputs.lowercase }}:latest
-  cache-name:
-    value: ghcr.io/${{ steps.lowercaseRepo.outputs.lowercase }}:cache
+  image:
+    description: Lowercase GHCR image name
+    value: ${{ steps.metadata.outputs.image }}
+  cache-scope:
+    description: Docker-safe cache scope unique to the selected ref
+    value: ${{ steps.metadata.outputs.cache-scope }}
+  baseline-scope:
+    description: Cache scope of the release branch
+    value: ${{ steps.metadata.outputs.baseline-scope }}
 
 runs:
   using: "composite"
   steps:
-    # Stop docker so we can mount more space at /var/lib/docker
-    - name: Stop docker
-      run: sudo systemctl stop docker
+    - name: Check build inputs and isolate Docker credentials
       shell: bash
+      env:
+        BUILD_JOBS: ${{ inputs.build-jobs }}
+      run: |
+        if ! [[ "$BUILD_JOBS" =~ ^[1-9][0-9]*$ ]] || (( BUILD_JOBS > 64 )); then
+          echo '::error::build-jobs must be an integer between 1 and 64'
+          exit 1
+        fi
+        missing_tools=()
+        for command in docker git python3 sha256sum; do
+          if ! command -v "$command" >/dev/null 2>&1; then
+            missing_tools+=("$command")
+          fi
+        done
+        if (( ${#missing_tools[@]} > 0 )); then
+          echo "::error::Missing required build tools: ${missing_tools[*]}"
+          exit 1
+        fi
+        docker_config="$RUNNER_TEMP/frigate-docker-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+        mkdir -p "$docker_config"
+        chmod 700 "$docker_config"
+        echo "DOCKER_CONFIG=$docker_config" >> "$GITHUB_ENV"
 
-    # This creates a virtual volume at /var/lib/docker to maximize the size
-    # As of 2/14/2024, this results in 97G for docker images
+    - name: Stop Docker
+      id: stop-docker
+      if: inputs.maximize-build-space == 'true' && runner.environment == 'github-hosted'
+      shell: bash
+      run: |
+        sudo systemctl stop docker
+        echo 'stopped=true' >> "$GITHUB_OUTPUT"
+
     - name: Maximize build space
-      uses: easimon/maximize-build-space@v10
+      if: inputs.maximize-build-space == 'true' && runner.environment == 'github-hosted'
+      uses: easimon/maximize-build-space@fc881a613ad2a34aca9c9624518214ebc21dfc0c # v10
       with:
         remove-dotnet: 'true'
         remove-android: 'true'
@@ -30,29 +69,79 @@ runs:
         remove-codeql: 'true'
         build-mount-path: '/var/lib/docker'
 
-    - name: Start docker
+    - name: Restart Docker
+      if: always() && steps.stop-docker.outputs.stopped == 'true'
       run: sudo systemctl start docker
       shell: bash
 
-    - id: lowercaseRepo
-      uses: ASzc/change-string-case-action@v8
-      with:
-        string: ${{ github.repository }}
+    - name: Check build resources
+      shell: python3 {0}
+      run: |
+        import json
+        import shutil
+        import subprocess
+
+        info = json.loads(subprocess.check_output(
+            ["docker", "info", "--format", "{{json .}}"], text=True,
+        ))
+        gib = 1024 ** 3
+        memory = info["MemTotal"]
+        print(f"Docker daemon memory: {memory / gib:.1f} GiB")
+        if memory < 6 * gib:
+            print("::error::At least 6 GiB of Docker daemon memory is required")
+            raise SystemExit(1)
+        try:
+            available = shutil.disk_usage(info["DockerRootDir"]).free
+        except (FileNotFoundError, PermissionError) as error:
+            print(f"Docker storage is not accessible from the runner; skipping capacity check: {error}")
+        else:
+            print(f"Free Docker storage: {available / gib:.1f} GiB")
+            if available < 60 * gib:
+                print("::error::At least 60 GiB free Docker storage is required")
+                raise SystemExit(1)
 
     - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v4
+      uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+      with:
+        version: v0.38.1
+        driver-opts: |
+          image=moby/buildkit:v0.34.1@sha256:99368f3e46177c6405b9740e4461d91cee004128daeecca78d4ceac50ec1da5c
+          env.BUILDKIT_STEP_LOG_MAX_SIZE=50000000
+        name: ${{ runner.environment == 'self-hosted' && format('frigate-rocm-{0}', github.repository_id) || '' }}
+        keep-state: ${{ runner.environment == 'self-hosted' }}
+        buildkitd-config: .github/buildkitd.toml
 
     - name: Log in to the Container registry
-      uses: docker/login-action@v4
+      uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4
       with:
         registry: ghcr.io
         username: ${{ github.actor }}
         password: ${{ inputs.GITHUB_TOKEN }}
 
-    - name: Create version file
-      run: make version
+    - name: Create build metadata
+      id: metadata
       shell: bash
+      env:
+        BASELINE_BRANCH: ${{ inputs.baseline-branch }}
+      run: |
+        echo "image=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+        python3 - <<'PY' >> "$GITHUB_OUTPUT"
+        import hashlib
+        import os
+        import re
+        import subprocess
+        from pathlib import Path
 
-    - id: create-short-sha
-      run: echo "SHORT_SHA=${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
-      shell: bash
+        for name, ref in (
+            ("cache-scope", os.environ["GITHUB_REF"]),
+            ("baseline-scope", "refs/heads/" + os.environ["BASELINE_BRANCH"]),
+        ):
+            slug = re.sub(r"[^a-z0-9_.-]+", "-", ref.lower())[:40]
+            suffix = hashlib.sha256(ref.encode()).hexdigest()[:12]
+            print(f"{name}={slug}-{suffix}")
+
+        version = re.search(r"^VERSION\s*=\s*(\S+)", Path("Makefile").read_text(), re.MULTILINE).group(1)
+        commit = subprocess.check_output(["git", "log", "-1", "--pretty=format:%h"], text=True)
+        Path("frigate/version.py").write_text(f'VERSION = "{version}-{commit}"\n')
+        Path("web/.env").write_text(f"VITE_GIT_COMMIT_HASH={commit}\n")
+        PY
