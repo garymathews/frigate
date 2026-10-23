@@ -1,0 +1,39 @@
+name: Build frigate (ROCm, self-hosted)
+
+on:
+  workflow_dispatch:
+    inputs:
+      build-jobs:
+        description: Number of compiler jobs (size for available memory)
+        type: number
+        default: 4
+      refresh-dependencies:
+        description: Refresh base images and runtime dependencies
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  rocm_build:
+    name: AMD64 ROCm Build
+    runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 720
+    concurrency:
+      group: rocm-10.1-${{ github.workflow }}
+      cancel-in-progress: false
+      queue: max
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Build and push
+        uses: ./.github/actions/rocm-build
+        with:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          publish-branch: ${{ vars.ROCM_PUBLISH_BRANCH || 'rocm-10.1' }}
+          build-jobs: ${{ inputs.build-jobs }}
+          refresh-dependencies: ${{ inputs.refresh-dependencies }}

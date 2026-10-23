@@ -1,0 +1,148 @@
+name: Build ROCm Frigate
+description: Prepare ROCm artifacts and build and publish the Frigate image
+inputs:
+  GITHUB_TOKEN:
+    description: Token for publishing to GHCR and checking the release branch
+    required: true
+  maximize-build-space:
+    description: Prepare extra Docker storage on GitHub-hosted runners
+    default: 'false'
+  build-jobs:
+    description: Number of compiler jobs
+    default: '4'
+  refresh-dependencies:
+    description: Refresh base images and runtime dependency layers
+    default: 'false'
+  publish-branch:
+    description: Branch allowed to advance the release tag and seed caches
+    default: rocm-10.1
+runs:
+  using: composite
+  steps:
+    - name: Setup
+      id: setup
+      uses: ./.github/actions/setup
+      with:
+        GITHUB_TOKEN: ${{ inputs.GITHUB_TOKEN }}
+        maximize-build-space: ${{ inputs.maximize-build-space }}
+        build-jobs: ${{ inputs.build-jobs }}
+        baseline-branch: ${{ inputs.publish-branch }}
+
+    - name: Find reusable ROCm artifacts
+      id: artifacts
+      shell: bash
+      env:
+        IMAGE: ${{ steps.setup.outputs.image }}
+      run: |
+        key=$(sha256sum docker/rocm/Dockerfile docker/rocm/rocm.hcl | sha256sum | cut -c1-24)
+        tag="$IMAGE:rocm-10.1-gfx900-artifacts-$key"
+        echo "tag=$tag" >> "$GITHUB_OUTPUT"
+        if digest=$(docker buildx imagetools inspect "$tag" --format '{{.Manifest.Digest}}' 2> "$RUNNER_TEMP/artifact-inspect.err"); then
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo 'exists=true' >> "$GITHUB_OUTPUT"
+        elif grep -Eqi 'not found|manifest unknown|name unknown' "$RUNNER_TEMP/artifact-inspect.err"; then
+          echo 'exists=false' >> "$GITHUB_OUTPUT"
+        else
+          cat "$RUNNER_TEMP/artifact-inspect.err" >&2
+          exit 1
+        fi
+
+    - name: Build and publish ROCm artifacts
+      id: build-artifacts
+      env:
+        BUILD_JOBS: ${{ inputs.build-jobs }}
+      if: steps.artifacts.outputs.exists != 'true'
+      uses: docker/bake-action@59cb1203cd42bcefd40a1b6d73b589e48c86040e # v7
+      with:
+        source: .
+        push: true
+        pull: ${{ inputs.refresh-dependencies == 'true' }}
+        targets: rocm-artifacts
+        files: docker/rocm/rocm.hcl
+        set: |
+          rocm-artifacts.tags=${{ steps.artifacts.outputs.tag }}
+          rocm-artifacts.labels.org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          rocm-artifacts.labels.org.opencontainers.image.revision=${{ github.sha }}
+          rocm-artifacts.cache-from=type=registry,ref=${{ steps.setup.outputs.image }}:cache-${{ steps.setup.outputs.cache-scope }}-artifacts
+          rocm-artifacts.cache-from=type=registry,ref=${{ steps.setup.outputs.image }}:cache-${{ steps.setup.outputs.baseline-scope }}-artifacts
+          rocm-artifacts.cache-to=type=registry,ref=${{ steps.setup.outputs.image }}:cache-${{ steps.setup.outputs.cache-scope }}-artifacts,mode=max
+
+    - name: Pin ROCm artifacts by digest
+      id: artifact-ref
+      shell: bash
+      env:
+        IMAGE: ${{ steps.setup.outputs.image }}
+        EXISTING_DIGEST: ${{ steps.artifacts.outputs.digest }}
+        BUILD_METADATA: ${{ steps.build-artifacts.outputs.metadata }}
+      run: |
+        digest="$EXISTING_DIGEST"
+        if [[ -z "$digest" ]]; then
+          digest=$(python3 -c 'import json, os; print(json.loads(os.environ["BUILD_METADATA"])["rocm-artifacts"]["containerimage.digest"])')
+        fi
+        [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]
+        echo "reference=$IMAGE@$digest" >> "$GITHUB_OUTPUT"
+
+    - name: Build and push Frigate
+      id: build
+      uses: docker/bake-action@59cb1203cd42bcefd40a1b6d73b589e48c86040e # v7
+      env:
+        ROCM_ARTIFACTS: docker-image://${{ steps.artifact-ref.outputs.reference }}
+      with:
+        source: .
+        push: true
+        pull: ${{ inputs.refresh-dependencies == 'true' }}
+        targets: rocm
+        files: docker/rocm/rocm.hcl
+        set: |
+          rocm.tags=${{ steps.setup.outputs.image }}:${{ github.sha }}-rocm-10.1
+          rocm.labels.org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          rocm.labels.org.opencontainers.image.revision=${{ github.sha }}
+          deps.no-cache-filter=${{ inputs.refresh-dependencies == 'true' && 'deps' || '' }}
+          rocm.no-cache-filter=${{ inputs.refresh-dependencies == 'true' && 'rocm-prelim-hsa-override0' || '' }}
+          deps.cache-from=type=registry,ref=${{ steps.setup.outputs.image }}:cache-${{ steps.setup.outputs.cache-scope }}-deps
+          deps.cache-from=type=registry,ref=${{ steps.setup.outputs.image }}:cache-${{ steps.setup.outputs.baseline-scope }}-deps
+          deps.cache-to=type=registry,ref=${{ steps.setup.outputs.image }}:cache-${{ steps.setup.outputs.cache-scope }}-deps,mode=max
+          rootfs.cache-from=type=registry,ref=${{ steps.setup.outputs.image }}:cache-${{ steps.setup.outputs.cache-scope }}-rootfs
+          rootfs.cache-from=type=registry,ref=${{ steps.setup.outputs.image }}:cache-${{ steps.setup.outputs.baseline-scope }}-rootfs
+          rootfs.cache-to=type=registry,ref=${{ steps.setup.outputs.image }}:cache-${{ steps.setup.outputs.cache-scope }}-rootfs,mode=max
+          rocm.cache-from=type=registry,ref=${{ steps.setup.outputs.image }}:cache-${{ steps.setup.outputs.cache-scope }}-rocm
+          rocm.cache-from=type=registry,ref=${{ steps.setup.outputs.image }}:cache-${{ steps.setup.outputs.baseline-scope }}-rocm
+          rocm.cache-to=type=registry,ref=${{ steps.setup.outputs.image }}:cache-${{ steps.setup.outputs.cache-scope }}-rocm,mode=max
+
+    - name: Advance the release tag for the current branch head
+      shell: python3 {0}
+      env:
+        GH_TOKEN: ${{ inputs.GITHUB_TOKEN }}
+        PUBLISH_BRANCH: ${{ inputs.publish-branch }}
+        IMAGE: ${{ steps.setup.outputs.image }}
+        BUILD_METADATA: ${{ steps.build.outputs.metadata }}
+      run: |
+        import json
+        import os
+        import subprocess
+        import urllib.parse
+        import urllib.request
+
+        digest = json.loads(os.environ["BUILD_METADATA"])["rocm"]["containerimage.digest"]
+        image = os.environ["IMAGE"]
+        with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
+            summary.write(f"Frigate: `{image}@{digest}`\n\n")
+        branch = os.environ["GITHUB_REF_NAME"]
+        if os.environ["GITHUB_REF_TYPE"] != "branch" or branch != os.environ["PUBLISH_BRANCH"]:
+            print("Published the commit image; this ref does not advance the release tag")
+            raise SystemExit(0)
+        ref = urllib.parse.quote(branch, safe="")
+        url = f'{os.environ["GITHUB_API_URL"]}/repos/{os.environ["GITHUB_REPOSITORY"]}/git/ref/heads/{ref}'
+        request = urllib.request.Request(url, headers={"Authorization": f'Bearer {os.environ["GH_TOKEN"]}'})
+        with urllib.request.urlopen(request, timeout=30) as response:
+            head = json.load(response)["object"]["sha"]
+        if head != os.environ["GITHUB_SHA"]:
+            print("Published the commit image; a newer commit owns the release tag")
+            raise SystemExit(0)
+        tag = f"{image}:latest-rocm-10.1"
+        subprocess.run([
+            "docker", "buildx", "imagetools", "create", "--prefer-index=false",
+            "--tag", tag, f"{image}@{digest}",
+        ], check=True)
+        with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
+            summary.write(f"Release tag: `{tag}`\n")
