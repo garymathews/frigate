@@ -392,6 +392,7 @@ def get_ort_providers(
             options.append(
                 {
                     "migraphx_model_cache_dir": migraphx_cache_dir,
+                    "migraphx_fp16_enable": 1,
                 }
             )
         elif provider == "CPUExecutionProvider":
