@@ -1,6 +1,7 @@
 import logging
 
 import ctypes
+import os
 import sys
 from pathlib import Path
 from typing import Literal
@@ -23,6 +24,7 @@ class migraphxDetectorConfig(BaseDetectorConfig):
     conserve_cpu: bool = Field(default=True, title="Conserve CPU at the expense of latency")
     fast_math: bool = Field(default=True, title="Optimize math functions to use faster approximate versions")
     exhaustive_tune: bool = Field(default=False, title="Use exhaustive search to find the fastest generated kernels")
+    fp16: bool = Field(default=True, title="Quantize FP32 convolution to FP16")
 
 class migraphxDetector(DetectionApi):
     type_key = DETECTOR_KEY
@@ -32,6 +34,15 @@ class migraphxDetector(DetectionApi):
 
         apply_amd_compatibility_env_vars()
 
+        assert detector_config.model.path is not None, "No model.path configured, please configure model.path"
+        assert detector_config.model.labelmap_path is not None, "No model.labelmap_path configured, please configure model.labelmap_path"
+
+        device = detector_config.device.lower()
+        assert device in ["gpu", "cpu"], "Invalid device set, must be gpu (default) or cpu"
+
+        if device == "gpu":
+            os.environ["MIGRAPHX_MLIR_USE_SPECIFIC_OPS"] = "convolution,fused_convolution"
+
         try:
             sys.path.append("/opt/rocm/lib")
             import migraphx
@@ -39,12 +50,6 @@ class migraphxDetector(DetectionApi):
         except ModuleNotFoundError:
             logger.error("migraphx: module loading failed, missing migraphx")
             raise
-
-        assert detector_config.model.path is not None, "No model.path configured, please configure model.path"
-        assert detector_config.model.labelmap_path is not None, "No model.labelmap_path configured, please configure model.labelmap_path"
-
-        device = detector_config.device.lower()
-        assert device in ["gpu", "cpu"], "Invalid device set, must be gpu (default) or cpu"
 
         try:
             if device == "gpu":
@@ -61,7 +66,7 @@ class migraphxDetector(DetectionApi):
         cache_dir.mkdir(parents=True, exist_ok=True)
 
         path = Path(detector_config.model.path)
-        filename = path.stem + ('_cpu' if device == 'cpu' else ('_tune' if detector_config.exhaustive_tune else ''))
+        filename = path.stem + ('_cpu' if device == 'cpu' else ('_tune' if detector_config.exhaustive_tune else '') + ('_fp16' if detector_config.fp16 else ''))
         mxr_cache_path = cache_dir / f"{filename}.mxr"
         mxr_path = path.parent / f"{filename}.mxr"
 
@@ -79,6 +84,16 @@ class migraphxDetector(DetectionApi):
                 self.model = migraphx.parse_onnx(str(path))
             else:
                 raise Exception(f"migraphx: unknown model format {path}")
+
+            compute_types = {
+                instruction.shape().type_string()
+                for instruction in self.model.get_main_module()
+                if instruction.name() in {"convolution", "dot"}
+            }
+
+            if detector_config.fp16 and ("float_type" in compute_types):
+                logger.info(f"migraphx: quantize model to fp16... ")
+                migraphx.quantize_fp16(self.model)
 
             logger.info(f"migraphx: compiling the model... (fast_math: {detector_config.fast_math}, exhaustive_tune: {detector_config.exhaustive_tune})")
             self.model.compile(
@@ -105,7 +120,7 @@ class migraphxDetector(DetectionApi):
         self.model_input_shape_obj = self.model.get_parameter_shapes()[self.model_param_name]
         self.model_input_shape = tuple(self.model_input_shape_obj.lens())
         self.model_input_arg = migraphx.generate_argument(self.model_input_shape_obj)
-        self.model_input_array = np.frombuffer(self.model_input_arg, dtype=np.float32).reshape(self.model_input_shape)
+        self.model_input_array = np.asarray(self.model_input_arg)
 
         logger.info(f"migraphx: model loaded (input: {self.model_input_shape})")
 
@@ -135,10 +150,7 @@ class migraphxDetector(DetectionApi):
 
         outputs = self.model.run({self.model_param_name: self.model_input_arg})
 
-        tensor_output = np.frombuffer(
-            outputs[0],
-            dtype=np.float32
-        ).reshape(outputs[0].get_shape().lens())
+        tensor_output = np.asarray(outputs[0], dtype=np.float32)
 
         return self.optimized_process_yolo(tensor_output)
 
