@@ -801,12 +801,15 @@ def get_optimized_runner(
         and not ONNXModelRunner.is_migraphx_complex_model(model_type)
         and (migraphx_devices := get_migraphx_devices())
     ):
-        migraphx_cache_dir = os.path.join(MODEL_CACHE_DIR, "migraphx/ort")
+        migraphx_cache_dir = os.path.join(MODEL_CACHE_DIR, "migraphx")
         os.makedirs(migraphx_cache_dir, exist_ok=True)
         sess_options = get_ort_session_options(model_type) or ort.SessionOptions()
         # only the first AMD GPU is used, matching detect_amd_gpu
         sess_options.add_provider_for_devices(
-            migraphx_devices[:1], {"cache_dir": migraphx_cache_dir}
+            migraphx_devices[:1], {
+                "migraphx_model_cache_dir": migraphx_cache_dir,
+                "migraphx_fp16_enable": 1,
+            }
         )
 
         try:
