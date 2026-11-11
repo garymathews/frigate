@@ -1,0 +1,6 @@
+[worker.oci]
+  gc = true
+  reservedSpace = "10GB"
+  maxUsedSpace = "60GB"
+  minFreeSpace = "20GB"
+  max-parallelism = 2

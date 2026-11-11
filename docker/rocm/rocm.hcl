@@ -1,31 +1,40 @@
-variable "HSA_OVERRIDE_GFX_VERSION" {
-  default = ""
-}
-variable "HSA_OVERRIDE" {
-  default = "1"
+variable "BUILD_JOBS" {
+  default = "4"
 }
 
-target deps {
-  dockerfile = "docker/main/Dockerfile"
-  platforms = ["linux/amd64"]
-  target = "deps"
+// A published artifact image can replace the local build using docker-image://.
+variable "ROCM_ARTIFACTS" {
+  default = "target:rocm-artifacts"
 }
 
-target rootfs {
-  dockerfile = "docker/main/Dockerfile"
-  platforms = ["linux/amd64"]
-  target = "rootfs"
-}
-
-target rocm {
-  dockerfile = "docker/rocm/Dockerfile"
-  contexts = {
-    deps = "target:deps",
-    rootfs = "target:rootfs"
+target "rocm-artifacts" {
+  dockerfile = "docker/rocm/Dockerfile.artifacts"
+  platforms  = ["linux/amd64"]
+  target     = "artifacts"
+  args       = {
+    BUILD_JOBS = BUILD_JOBS
   }
-  platforms = ["linux/amd64"]
-  args = {
-    HSA_OVERRIDE_GFX_VERSION = HSA_OVERRIDE_GFX_VERSION,
-    HSA_OVERRIDE = HSA_OVERRIDE
+}
+
+target "deps" {
+  dockerfile = "docker/main/Dockerfile"
+  platforms  = ["linux/amd64"]
+  target     = "deps"
+}
+
+target "rootfs" {
+  dockerfile = "docker/main/Dockerfile"
+  platforms  = ["linux/amd64"]
+  target     = "rootfs"
+}
+
+target "rocm" {
+  dockerfile = "docker/rocm/Dockerfile"
+  platforms  = ["linux/amd64"]
+  target     = "rocm-deps"
+  contexts   = {
+    deps           = "target:deps",
+    rocm-artifacts = ROCM_ARTIFACTS,
+    rootfs         = "target:rootfs"
   }
 }
