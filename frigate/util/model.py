@@ -384,9 +384,15 @@ def get_ort_providers(
                     }
                 )
         elif provider == "MIGraphXExecutionProvider":
-            # statically linked EP in this image, so request it by name
             providers.append(provider)
-            options.append({})
+
+            migraphx_cache_dir = os.path.join(MODEL_CACHE_DIR, "migraphx")
+            os.makedirs(migraphx_cache_dir, exist_ok=True)
+            options.append({
+                "migraphx_model_cache_dir": migraphx_cache_dir,
+                "migraphx_fp16_enable": 1,
+            })
+
         elif provider == "CPUExecutionProvider":
             providers.append(provider)
             options.append(

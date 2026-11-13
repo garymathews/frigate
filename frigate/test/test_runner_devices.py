@@ -547,34 +547,17 @@ class TestMIGraphX(unittest.TestCase):
             migraphx.assert_not_called()
             self.assertEqual(loaded_devices[model_path], (model_type, "CPU"))
 
-    def test_migraphx_is_requested_by_name_when_linked(self):
-        # the ROCm image links the EP statically and installs no plugin, so
-        # it is only used when requested by name
+    def test_migraphx_is_never_requested_by_name(self):
         with patch.object(
             model_util.ort,
             "get_available_providers",
             return_value=[
-                "MIGraphXExecutionProvider",
+                "AzureExecutionProvider",
                 "CPUExecutionProvider",
+                "MIGraphXExecutionProvider",
             ],
         ):
             providers, options = model_util.get_ort_providers()
-
-        self.assertEqual(
-            providers, ["MIGraphXExecutionProvider", "CPUExecutionProvider"]
-        )
-        self.assertEqual(options, [{}, {"enable_cpu_mem_arena": False}])
-
-    def test_force_cpu_skips_migraphx(self):
-        with patch.object(
-            model_util.ort,
-            "get_available_providers",
-            return_value=[
-                "MIGraphXExecutionProvider",
-                "CPUExecutionProvider",
-            ],
-        ):
-            providers, options = model_util.get_ort_providers(force_cpu=True)
 
         self.assertEqual(providers, ["CPUExecutionProvider"])
         self.assertEqual(options, [{"enable_cpu_mem_arena": False}])
