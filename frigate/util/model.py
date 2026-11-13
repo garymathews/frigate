@@ -384,9 +384,9 @@ def get_ort_providers(
                     }
                 )
         elif provider == "MIGraphXExecutionProvider":
-            # MIGraphX is a plugin provider, which ONNX Runtime can't create by
-            # name, so get_optimized_runner selects it through its devices
-            continue
+            # statically linked EP in this image, so request it by name
+            providers.append(provider)
+            options.append({})
         elif provider == "CPUExecutionProvider":
             providers.append(provider)
             options.append(
